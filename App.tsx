@@ -147,7 +147,11 @@ export default function App() {
               <Text style={styles.eyebrow}>CURRENT BATTERY LEVEL</Text>
               <View style={styles.percentageRow}>
                 <Text style={styles.percentage}>
-                  {battery ? `${battery.level}` : '--'}
+                  {battery
+                    ? battery.preciseLevel != null
+                      ? format(battery.preciseLevel, 2)
+                      : `${battery.level}`
+                    : '--'}
                 </Text>
                 <Text style={styles.percentSign}>%</Text>
               </View>
@@ -156,7 +160,7 @@ export default function App() {
                 <View
                   style={[
                     styles.progressFill,
-                    { width: `${battery?.level ?? 0}%` },
+                    { width: `${battery?.preciseLevel ?? battery?.level ?? 0}%` },
                   ]}
                 />
               </View>
@@ -165,7 +169,9 @@ export default function App() {
                 {battery?.status ?? 'Reading battery...'}
               </Text>
               <Text style={styles.precisionNote}>
-                Android-reported battery percentage
+                {battery?.preciseLevel != null
+                  ? 'Precise level from charge counter (real decimal reading)'
+                  : 'Android-reported percentage (precise data unavailable)'}
               </Text>
             </View>
 

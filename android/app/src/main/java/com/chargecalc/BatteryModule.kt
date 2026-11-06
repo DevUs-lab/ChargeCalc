@@ -24,6 +24,25 @@ class BatteryModule(private val context: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Reads the first positive value of [fileName] found across every
+     * /sys/class/power_supply node. Manufacturers expose battery data under
+     * different node names (battery, bms, main, ...), so we scan them all
+     * instead of hard-coding one. Falls back to a list of common node names if
+     * the directory can't be listed.
+     */
+    private fun readFirstSysfs(fileName: String): Long? {
+        val dir = File("/sys/class/power_supply")
+        val nodes = dir.listFiles()?.toList()
+            ?: listOf("battery", "bms", "main", "bms-llk", "battery-cc", "bm")
+                .map { File("/sys/class/power_supply/$it") }
+        for (node in nodes) {
+            val value = readSysfs(File(node, fileName).path)
+            if (value != null && value > 0) return value
+        }
+        return null
+    }
+
     @ReactMethod
     fun getBatteryInfo(promise: Promise) {
         try {
@@ -83,7 +102,7 @@ class BatteryModule(private val context: ReactApplicationContext) :
             val voltage =
                 batteryIntent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
 
-            val chargeCounter =
+            val chargeCounterApi =
                 manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
 
             val currentNow =
@@ -108,8 +127,17 @@ class BatteryModule(private val context: ReactApplicationContext) :
                 map.putNull("voltageMv")
             }
 
-            if (chargeCounter != Int.MIN_VALUE && chargeCounter >= 0) {
-                map.putDouble("chargeCounterUah", chargeCounter.toDouble())
+            // Remaining charge (numerator): prefer the Android API, fall back to
+            // sysfs charge_now so devices that don't report via the API still
+            // get a real reading.
+            val chargeNowUah: Long? = when {
+                chargeCounterApi != Int.MIN_VALUE && chargeCounterApi >= 0 ->
+                    chargeCounterApi.toLong()
+                else -> readFirstSysfs("charge_now")
+            }
+
+            if (chargeNowUah != null) {
+                map.putDouble("chargeCounterUah", chargeNowUah.toDouble())
             } else {
                 map.putNull("chargeCounterUah")
             }
@@ -120,19 +148,35 @@ class BatteryModule(private val context: ReactApplicationContext) :
                 map.putNull("currentNowUa")
             }
 
-            val fullCapacity = readSysfs(
-                "/sys/class/power_supply/battery/charge_full"
-            )
+            // Real full capacity (denominator): scanned across every power
+            // supply node so it works on any phone that exposes it.
+            val fullCapacityUah = readFirstSysfs("charge_full")
 
-            if (fullCapacity != null && fullCapacity > 0) {
-                map.putDouble("fullCapacityMah", fullCapacity / 1000.0)
+            if (fullCapacityUah != null && fullCapacityUah > 0) {
+                map.putDouble("fullCapacityMah", fullCapacityUah / 1000.0)
             } else {
                 map.putNull("fullCapacityMah")
             }
 
-            val cycles = readSysfs(
-                "/sys/class/power_supply/battery/cycle_count"
-            )
+            // Real, precise state-of-charge (e.g. 85.34) from the actual
+            // remaining charge divided by the real full capacity. Sent only when
+            // both real charge readings are available; otherwise null so the UI
+            // shows the honest integer instead of a fake ".00".
+            val preciseLevel: Double? =
+                if (chargeNowUah != null && fullCapacityUah != null && fullCapacityUah > 0) {
+                    (chargeNowUah.toDouble() / fullCapacityUah.toDouble() * 100.0)
+                        .coerceIn(0.0, 100.0)
+                } else {
+                    null
+                }
+
+            if (preciseLevel != null) {
+                map.putDouble("preciseLevel", preciseLevel)
+            } else {
+                map.putNull("preciseLevel")
+            }
+
+            val cycles = readFirstSysfs("cycle_count")
 
             if (cycles != null && cycles >= 0) {
                 map.putDouble("cycleCount", cycles.toDouble())
