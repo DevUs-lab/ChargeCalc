@@ -16,6 +16,26 @@ const format = (value, digits = 1) =>
     ? 'Unavailable'
     : Number(value).toFixed(digits);
 
+const pad2 = n => String(Math.floor(n)).padStart(2, '0');
+
+// Formats an elapsed duration in ms as H:MM:SS (or MM:SS under an hour).
+const formatDuration = ms => {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '--';
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return h > 0 ? `${h}:${pad2(m)}:${pad2(s)}` : `${pad2(m)}:${pad2(s)}`;
+};
+
+// Formats a timestamp as a short wall-clock time, e.g. "14:32". Uses plain
+// getHours/getMinutes (no Intl) so it works reliably on Hermes.
+const formatClock = ts => {
+  if (ts == null || !Number.isFinite(ts)) return '--';
+  const d = new Date(ts);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
+
 const MetricCard = ({ title, value, subtitle, wide = false }) => (
   <View style={[styles.card, wide && styles.wideCard]}>
     <Text style={styles.cardTitle}>{title}</Text>
@@ -30,6 +50,16 @@ export default function App() {
   const [speed, setSpeed] = useState(null);
   const [timeToFull, setTimeToFull] = useState(null);
   const samples = useRef([]);
+
+  // Charging session timer: when charging starts we record the plug-in time
+  // and count up; when it stops we freeze the total so the user sees how long
+  // that session took.
+  const [chargingSince, setChargingSince] = useState(null);
+  const [chargeSessionStart, setChargeSessionStart] = useState(null);
+  const [chargeSessionMs, setChargeSessionMs] = useState(null);
+  const [, setTick] = useState(0);
+  const chargingSinceRef = useRef(null);
+  const chargeSessionStartRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
@@ -49,6 +79,24 @@ export default function App() {
 
         // Keep recent real percentage readings for rate calculation.
         const now = Date.now();
+
+        // Start the charging timer when the status enters "Charging", and
+        // freeze it (recording the total) when it leaves, so the user can see
+        // how long the last charge session took.
+        const isCharging = data.status === 'Charging';
+        if (isCharging) {
+          if (chargingSinceRef.current == null) {
+            chargingSinceRef.current = now;
+            chargeSessionStartRef.current = now;
+            setChargingSince(now);
+            setChargeSessionStart(now);
+            setChargeSessionMs(null);
+          }
+        } else if (chargingSinceRef.current != null) {
+          setChargeSessionMs(now - chargingSinceRef.current);
+          chargingSinceRef.current = null;
+          setChargingSince(null);
+        }
         samples.current = [
           ...samples.current,
           { level: data.level, time: now },
@@ -87,10 +135,23 @@ export default function App() {
     };
   }, []);
 
+  // Re-render once per second while charging so the live timer counts up.
+  useEffect(() => {
+    if (chargingSince == null) return;
+    const id = setInterval(() => setTick(t => (t + 1) % 1000000), 1000);
+    return () => clearInterval(id);
+  }, [chargingSince]);
+
   const currentA =
     battery?.currentNowUa != null
       ? Math.abs(battery.currentNowUa) / 1000000
       : null;
+
+  // Live elapsed time while charging, or the frozen total of the last session.
+  const isChargingNow = chargingSince != null;
+  const chargeElapsedMs = isChargingNow
+    ? Date.now() - chargingSince
+    : chargeSessionMs;
 
   const voltageV =
     battery?.voltageMv != null ? battery.voltageMv / 1000 : null;
@@ -172,6 +233,55 @@ export default function App() {
                 {battery?.preciseLevel != null
                   ? 'Precise level from charge counter (real decimal reading)'
                   : 'Android-reported percentage (precise data unavailable)'}
+              </Text>
+            </View>
+
+            <Text style={styles.sectionTitle}>CHARGING SESSION</Text>
+            <View style={styles.sessionCard}>
+              <View style={styles.sessionHeader}>
+                <Text style={styles.eyebrow}>PLUG-IN TIMER</Text>
+                <View
+                  style={[
+                    styles.sessionPill,
+                    isChargingNow && styles.sessionPillActive,
+                  ]}>
+                  <View
+                    style={[
+                      styles.sessionPillDot,
+                      isChargingNow && styles.sessionPillDotActive,
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.sessionPillText,
+                      isChargingNow && styles.sessionPillTextActive,
+                    ]}>
+                    {isChargingNow ? 'Charging' : 'Not charging'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.sessionTimerRow}>
+                <View style={styles.sessionTimerBlock}>
+                  <Text style={styles.sessionTimerLabel}>Plugged in at</Text>
+                  <Text style={styles.sessionTimerValue}>
+                    {formatClock(chargeSessionStart)}
+                  </Text>
+                </View>
+                <View style={styles.sessionTimerBlock}>
+                  <Text style={styles.sessionTimerLabel}>Time spent</Text>
+                  <Text style={styles.sessionTimerValueBig}>
+                    {formatDuration(chargeElapsedMs)}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.sessionHint}>
+                {isChargingNow
+                  ? 'Timer running since the charger was connected'
+                  : chargeSessionMs != null
+                    ? 'Last charging session (timer stopped)'
+                    : 'Plug in a charger to start the timer'}
               </Text>
             </View>
 
@@ -306,6 +416,55 @@ const styles = StyleSheet.create({
   progressFill: { height: '100%', backgroundColor: '#A3E635', borderRadius: 10 },
   heroStatus: { color: '#A3E635', fontSize: 15, fontWeight: '700', marginTop: 17 },
   precisionNote: { color: '#8792A8', fontSize: 11, marginTop: 5 },
+  sessionCard: {
+    backgroundColor: '#151D2D',
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#263247',
+    marginBottom: 28,
+  },
+  sessionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  sessionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1C2233',
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  sessionPillActive: { backgroundColor: '#17251B' },
+  sessionPillDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#5B6678',
+    marginRight: 7,
+  },
+  sessionPillDotActive: { backgroundColor: '#A3E635' },
+  sessionPillText: { color: '#8792A8', fontSize: 11, fontWeight: '800' },
+  sessionPillTextActive: { color: '#A3E635' },
+  sessionTimerRow: { flexDirection: 'row', alignItems: 'center' },
+  sessionTimerBlock: { flex: 1 },
+  sessionTimerLabel: { color: '#98A5BA', fontSize: 11, fontWeight: '600' },
+  sessionTimerValue: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '800',
+    marginTop: 8,
+  },
+  sessionTimerValueBig: {
+    color: '#A3E635',
+    fontSize: 28,
+    fontWeight: '800',
+    marginTop: 8,
+  },
+  sessionHint: { color: '#758198', fontSize: 11, marginTop: 16 },
   sectionTitle: {
     color: '#8792A8', fontSize: 12, fontWeight: '800',
     letterSpacing: 1.4, marginBottom: 13,
